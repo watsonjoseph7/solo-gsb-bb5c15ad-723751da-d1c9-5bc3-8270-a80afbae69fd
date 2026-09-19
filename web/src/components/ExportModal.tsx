@@ -33,6 +33,12 @@ export function ExportModal({ vtt, audit, onClose }: Props) {
           <span>例外 {audit.stats.exceptionHits}</span>
           <span>记录 {audit.records.length} 条</span>
         </div>
+        <div className="export-safety">
+          ✓ 导出残留防线：二次扫描通过
+          {audit.safetyScan.counts.kept > 0
+            ? `（${audit.safetyScan.counts.kept} 处人工保留命中，仅提示并已记入审计）`
+            : '（候选文本无残留命中）'}
+        </div>
         <div className="modal-actions">
           <button
             className="btn"

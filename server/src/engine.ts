@@ -13,6 +13,10 @@ import type {
   HitException,
   MaskRule,
   PreviewResult,
+  SafetyScanIssue,
+  SafetyScanKind,
+  SafetyScanSegment,
+  SafetyScanSummary,
   SuppressedHit,
 } from './types';
 
@@ -443,6 +447,9 @@ export function buildPreview(input: {
     }
   }
 
+  /* ---------- 导出残留防线：按最终状态生成候选文本并二次扫描 ---------- */
+  const safety = runSafetyScan(cues, compiled);
+
   return {
     cueCount: parsed.cues.length,
     totalHits,
@@ -454,6 +461,7 @@ export function buildPreview(input: {
     parseErrors: parsed.errors,
     aliases,
     entities: Array.from(entityMap.values()),
+    safety,
   };
 }
 
@@ -474,6 +482,143 @@ export function applyHitsToPayload(cue: CueHit): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 导出残留防线：候选文本二次扫描                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 按最终状态把 cue 纯文本拼成候选导出文本，并记录逐字符来源：
+ *  - original：未被任何胜出命中覆盖的原文；
+ *  - reverted：人工保留（逐条例外撤销 / 实体「始终保留」决定）的原文；
+ *  - replacement：替换产物（模板展开或稳定化名）。
+ * 与 applyHitsToPayload 的语义一致（命中区间覆盖的内联标签被整体移除），
+ * 区别仅在于这里作用于纯文本并保留来源映射，供二次扫描分类使用。
+ */
+export function buildFinalText(cue: CueHit): { text: string; segments: SafetyScanSegment[] } {
+  const sorted = [...cue.hits].sort((a, b) => a.start - b.start);
+  const segments: SafetyScanSegment[] = [];
+  let text = '';
+  let pos = 0;
+  const push = (
+    source: SafetyScanSegment['source'],
+    chunk: string,
+    hit?: Hit,
+  ): void => {
+    // 空替换片段仍保留为零长边界：跨边界判定需要感知「这里发生过替换」
+    if (!chunk && source === 'original') return;
+    segments.push({
+      start: text.length,
+      end: text.length + chunk.length,
+      source,
+      ruleId: hit?.ruleId,
+      ruleName: hit?.ruleName,
+      text: chunk,
+    });
+    text += chunk;
+  };
+  for (const h of sorted) {
+    if (h.start > pos) push('original', cue.text.slice(pos, h.start));
+    if (h.reverted) push('reverted', cue.text.slice(h.start, h.end + 1), h);
+    else push('replacement', h.replacement, h);
+    pos = h.end + 1;
+  }
+  if (pos < cue.text.length) push('original', cue.text.slice(pos));
+  return { text, segments };
+}
+
+/**
+ * 导出残留防线：对每条 cue 的候选导出文本再次运行全部启用规则，
+ * 用替换前后字符来源映射把二次命中分为三类：
+ *  - 人工保留（kept）：命中不涉及任何替换产物，且与人工保留的原文重叠
+ *    （保留命中本身，或第一遍被抑制、因胜出命中被保留而复现的命中）→ 仅提示；
+ *  - 替换产物（artifact）：命中完全落在单个替换产物内 → 阻断导出，
+ *    报告来源规则（产生替换）与目标规则（二次命中）；
+ *  - 跨边界新命中（crossBoundary）：命中跨越多个来源片段（含替换边界），
+ *    或因替换改变上下文而落在纯原文上的全新命中 → 阻断导出，列出全部涉及区间。
+ * 不做优先级合并：任何残留命中都需要被审校员看到。
+ */
+export function runSafetyScan(
+  cues: CueHit[],
+  compiled: CompiledRule[],
+): SafetyScanSummary {
+  const issues: SafetyScanIssue[] = [];
+  let kept = 0;
+  let artifact = 0;
+  let crossBoundary = 0;
+
+  for (const cue of cues) {
+    const { text, segments } = buildFinalText(cue);
+    if (!text) continue;
+    for (const { rule, regex } of compiled) {
+      regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(text)) !== null) {
+        const matched = m[0];
+        if (matched.length === 0) {
+          regex.lastIndex++;
+          continue;
+        }
+        const start = m.index;
+        const end = start + matched.length;
+        const overlapped = segments.filter((s) => s.start < end && start < s.end);
+
+        const hasReplacement = overlapped.some((s) => s.source === 'replacement');
+        const hasReverted = overlapped.some((s) => s.source === 'reverted');
+        let kind: SafetyScanKind;
+        if (!hasReplacement && hasReverted) {
+          // 残留源于人工保留的原文（含被抑制命中随保留复现），仅提示
+          kind = 'kept';
+        } else if (overlapped.length === 1 && overlapped[0].source === 'replacement') {
+          kind = 'artifact';
+        } else {
+          kind = 'crossBoundary';
+        }
+
+        const sourceSeg = kind === 'artifact' ? overlapped[0] : undefined;
+        issues.push({
+          cueIndex: cue.index,
+          cueId: cue.id,
+          time: { start: cue.start, end: cue.end },
+          rule: { id: rule.id, name: rule.name },
+          start,
+          end,
+          match: matched,
+          kind,
+          sourceRule:
+            sourceSeg && sourceSeg.ruleId
+              ? { id: sourceSeg.ruleId, name: sourceSeg.ruleName ?? '' }
+              : undefined,
+          segments: overlapped,
+        });
+        if (kind === 'kept') kept++;
+        else if (kind === 'artifact') artifact++;
+        else crossBoundary++;
+      }
+    }
+  }
+
+  return {
+    kept,
+    artifact,
+    crossBoundary,
+    blocked: artifact + crossBoundary > 0,
+    issues,
+  };
+}
+
+/** 导出残留防线拦截：候选文本仍存在替换产物 / 跨边界新命中 */
+export class SafetyScanBlockedError extends Error {
+  scan: SafetyScanSummary;
+  constructor(scan: SafetyScanSummary) {
+    super(
+      `导出残留防线拦截：候选文本仍有 ${scan.artifact} 处替换产物命中、` +
+        `${scan.crossBoundary} 处跨边界新命中，请调整规则或改为人为保留后再导出`,
+    );
+    this.name = 'SafetyScanBlockedError';
+    this.scan = scan;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 导出                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -487,6 +632,8 @@ export function exportResult(input: {
   jobId?: string;
 }): ExportResult {
   const preview = buildPreview(input);
+  // 导出残留防线：替换产物 / 跨边界新命中阻断导出（人工保留仅提示）
+  if (preview.safety.blocked) throw new SafetyScanBlockedError(preview.safety);
   const parsed = parseVtt(input.vtt);
   const payloadByIndex = new Map<number, string>();
   for (const cue of preview.cues) {
@@ -528,7 +675,7 @@ export function exportResult(input: {
   const sha256 = createHash('sha256').update(input.vtt, 'utf8').digest('hex');
   const audit: AuditReport = {
     app: 'subtitle-mask-console',
-    version: 3,
+    version: 4,
     generatedAt: new Date().toISOString(),
     source: {
       sha256,
@@ -551,6 +698,15 @@ export function exportResult(input: {
       action: d.action,
       decidedAt: d.decidedAt,
     })),
+    safetyScan: {
+      blocked: preview.safety.blocked,
+      counts: {
+        kept: preview.safety.kept,
+        artifact: preview.safety.artifact,
+        crossBoundary: preview.safety.crossBoundary,
+      },
+      issues: preview.safety.issues,
+    },
   };
 
   return {

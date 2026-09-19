@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { CueHit, Hit, PreviewResult } from '../types';
+import { SafetyPanel } from './SafetyPanel';
 
 interface Props {
   preview: PreviewResult | null;
@@ -26,16 +27,18 @@ function segments(cue: CueHit): { text: string; hit?: Hit }[] {
 
 function CueCard({
   cue,
+  flash,
   onToggleHit,
   onClearException,
 }: {
   cue: CueHit;
+  flash: boolean;
   onToggleHit: (k: string) => void;
   onClearException: (k: string) => void;
 }) {
   const segs = useMemo(() => segments(cue), [cue]);
   return (
-    <article className="cue-card">
+    <article id={`cue-card-${cue.index}`} className={`cue-card ${flash ? 'cue-flash' : ''}`}>
       <div className="cue-time mono">
         {cue.start}
         {' --> '}
@@ -126,11 +129,31 @@ export function Preview({
   onApplyAll,
 }: Props) {
   const [onlyMatched, setOnlyMatched] = useState(false);
+  /** 残留防线「定位」闪烁的 cue 序号 */
+  const [flashCue, setFlashCue] = useState<number | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const cues = useMemo(() => {
     if (!preview) return [];
     return onlyMatched ? preview.cues.filter((c) => c.hits.length > 0) : preview.cues;
   }, [preview, onlyMatched]);
+
+  /** 定位到指定 cue：滚动到卡片并短暂闪烁 */
+  const locateCue = (cueIndex: number) => {
+    // 问题所在 cue 必有命中，不会被「仅看命中」过滤；此处仍兜底展开
+    setOnlyMatched(false);
+    setFlashCue(cueIndex);
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`cue-card-${cueIndex}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(
+      () => setFlashCue((cur) => (cur === cueIndex ? null : cur)),
+      1800,
+    );
+  };
 
   return (
     <section className="panel panel-grow">
@@ -171,8 +194,19 @@ export function Preview({
           {preview.exceptionHits > 0 && (
             <span className="stat-exception">逐条例外 {preview.exceptionHits}</span>
           )}
+          {preview.safety.blocked ? (
+            <span className="stat-safety-blocked">
+              残留阻断 {preview.safety.artifact + preview.safety.crossBoundary}
+            </span>
+          ) : preview.safety.kept > 0 ? (
+            <span className="stat-safety-kept">残留提示 {preview.safety.kept}</span>
+          ) : (
+            <span className="stat-safety-ok">残留检查通过</span>
+          )}
         </div>
       )}
+
+      {preview && <SafetyPanel safety={preview.safety} onLocate={locateCue} />}
 
       <div className="cue-list">
         {preview && cues.length === 0 && <div className="empty-tip">没有可显示的字幕。</div>}
@@ -180,6 +214,7 @@ export function Preview({
           <CueCard
             key={c.index}
             cue={c}
+            flash={flashCue === c.index}
             onToggleHit={onToggleHit}
             onClearException={onClearException}
           />

@@ -236,9 +236,13 @@ export default function App() {
       const result = await api.export({ vtt, rules, hitExceptions, entityDecisions, aliases });
       setExportData(result);
     } catch (e) {
+      // 残留防线 409：预览会随即重算并展示问题清单，这里给出横幅提示
       setError(`导出失败：${(e as Error).message}`);
     }
   };
+
+  /** 导出残留防线：候选文本存在替换产物 / 跨边界新命中时阻断导出 */
+  const safetyBlocked = preview?.safety.blocked ?? false;
 
   const saveLabel = {
     idle: '',
@@ -258,8 +262,22 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-right">
+          {safetyBlocked && (
+            <span className="safety-blocked-tag" title="候选导出文本仍存在替换产物 / 跨边界新命中，详见右侧「导出残留防线」清单">
+              ⛔ 残留检查未通过
+            </span>
+          )}
           <span className={`save-state save-${saveState}`}>{saveLabel}</span>
-          <button className="btn btn-primary btn-lg" onClick={doExport} disabled={!vtt.trim()}>
+          <button
+            className="btn btn-primary btn-lg"
+            onClick={doExport}
+            disabled={!vtt.trim() || safetyBlocked}
+            title={
+              safetyBlocked
+                ? '导出残留防线：存在替换产物 / 跨边界新命中，请先在预览区处理'
+                : undefined
+            }
+          >
             ④ 确认并导出
           </button>
         </div>

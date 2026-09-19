@@ -145,6 +145,65 @@ export interface EntitySummary {
   exceptionHits: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* 导出残留防线（二次扫描）                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 二次扫描命中分类：
+ * - kept：人工保留——命中不涉及替换产物，且与人工保留（撤销 / 实体保留决定）的
+ *   原文重叠（含第一遍被抑制、因胜出命中被保留而复现的命中），仅提示；
+ * - artifact：替换产物——命中完全落在单个替换产物内，阻断导出；
+ * - crossBoundary：跨边界新命中——命中跨越多个来源片段（含替换边界），或因替换
+ *   改变上下文而落在纯原文上的全新命中，阻断导出。
+ */
+export type SafetyScanKind = 'kept' | 'artifact' | 'crossBoundary';
+
+/** 候选导出文本中的一个来源片段（替换前后字符来源映射的最小单位） */
+export interface SafetyScanSegment {
+  /** 在候选导出 cue 纯文本中的起止偏移（不含 end） */
+  start: number;
+  end: number;
+  /** original 未命中原文 / reverted 人工保留原文 / replacement 替换产物 */
+  source: 'original' | 'reverted' | 'replacement';
+  /** 产生该片段的规则（original 片段无） */
+  ruleId?: string;
+  ruleName?: string;
+  /** 片段文本 */
+  text: string;
+}
+
+/** 二次扫描发现的一条问题（可定位到 cue 与文本区间） */
+export interface SafetyScanIssue {
+  cueIndex: number;
+  cueId: string;
+  time: { start: string; end: string };
+  /** 二次命中的规则（目标规则） */
+  rule: { id: string; name: string };
+  /** 在候选导出 cue 纯文本中的区间（不含 end） */
+  start: number;
+  end: number;
+  match: string;
+  kind: SafetyScanKind;
+  /** kind=artifact：产生该替换产物的来源规则 */
+  sourceRule?: { id: string; name: string };
+  /** 命中涉及的来源片段（跨边界时为全部涉及区间） */
+  segments: SafetyScanSegment[];
+}
+
+/** 二次扫描汇总：分类计数 + 问题清单 */
+export interface SafetyScanSummary {
+  /** 人工保留（仅提示） */
+  kept: number;
+  /** 替换产物（阻断导出） */
+  artifact: number;
+  /** 跨边界新命中（阻断导出） */
+  crossBoundary: number;
+  /** 是否存在阻断项（artifact + crossBoundary > 0） */
+  blocked: boolean;
+  issues: SafetyScanIssue[];
+}
+
 export interface PreviewResult {
   cueCount: number;
   totalHits: number;
@@ -159,6 +218,8 @@ export interface PreviewResult {
   aliases: AliasEntry[];
   /** 实体决策列表（当前命中实体 + 已持久决定的实体） */
   entities: EntitySummary[];
+  /** 导出残留防线：按最终状态生成候选文本后二次扫描的结果 */
+  safety: SafetyScanSummary;
 }
 
 export interface PreviewInput {
@@ -216,6 +277,12 @@ export interface AuditReport {
   aliases?: AliasEntry[];
   /** 导出时生效的实体级决定 */
   entityDecisions?: EntityDecision[];
+  /** 导出残留防线：二次扫描分类计数与问题清单（导出被阻断时无审计文件） */
+  safetyScan: {
+    blocked: boolean;
+    counts: { kept: number; artifact: number; crossBoundary: number };
+    issues: SafetyScanIssue[];
+  };
 }
 
 export interface JobState {
