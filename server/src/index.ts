@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { buildPreview, exportResult, normalizeRule } from './engine';
+import { buildPreview, exportResult, ExportBlockedError, normalizeRule } from './engine';
 import { PRESETS } from './presets';
 import { JobStore } from './store';
 import type {
@@ -231,7 +231,7 @@ app.post('/api/preview', (req, res) => {
   }
 });
 
-/** 确认导出：新 VTT + JSON 审计报告 */
+/** 确认导出：新 VTT + JSON 审计报告（残留防线阻断时返回 409 + 分类明细） */
 app.post('/api/export', (req, res) => {
   try {
     const input = readPreviewBody(req);
@@ -241,6 +241,11 @@ app.post('/api/export', (req, res) => {
     });
     res.json(result);
   } catch (e) {
+    if (e instanceof ExportBlockedError) {
+      return res
+        .status(409)
+        .json({ error: e.message, safetyScan: e.safetyScan });
+    }
     res.status(400).json({ error: (e as Error).message });
   }
 });

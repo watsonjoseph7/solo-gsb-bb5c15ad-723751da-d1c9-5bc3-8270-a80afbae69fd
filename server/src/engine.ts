@@ -13,6 +13,11 @@ import type {
   HitException,
   MaskRule,
   PreviewResult,
+  SafetyIssue,
+  SafetyIssueKind,
+  SafetyScanCounts,
+  SafetyScanResult,
+  SafetySegment,
   SuppressedHit,
 } from './types';
 
@@ -443,6 +448,9 @@ export function buildPreview(input: {
     }
   }
 
+  /* ---------- 导出残留防线：按最终状态重建候选文本，二次运行启用规则 ---------- */
+  const safetyScan = safetyScanCues(cues, compiled);
+
   return {
     cueCount: parsed.cues.length,
     totalHits,
@@ -454,6 +462,7 @@ export function buildPreview(input: {
     parseErrors: parsed.errors,
     aliases,
     entities: Array.from(entityMap.values()),
+    safetyScan,
   };
 }
 
@@ -474,6 +483,184 @@ export function applyHitsToPayload(cue: CueHit): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 导出残留防线：二次扫描 + 替换前后字符来源分类                          */
+/* ------------------------------------------------------------------ */
+
+/** 导出文本中每个字符的来源：人工保留的原文 / 某次替换的产物 */
+interface CharOrigin {
+  origin: 'original' | 'replacement';
+  /** origin=replacement 时：产生该字符的命中 */
+  hitKey?: string;
+  ruleId?: string;
+  ruleName?: string;
+}
+
+/**
+ * 按最终状态（应用全部未撤销命中）重建 cue 的导出纯文本，
+ * 并逐字符记录来源：未替换区间来自原文，替换区间来自对应命中的替换产物。
+ * 与 applyHitsToPayload 作用在同一批最终命中上，二者文本一致（此处为去标签纯文本）。
+ */
+export function finalTextWithOrigins(cue: CueHit): {
+  finalText: string;
+  origins: CharOrigin[];
+} {
+  const applied = cue.hits.filter((h) => !h.reverted).sort((a, b) => a.start - b.start);
+  let finalText = '';
+  const origins: CharOrigin[] = [];
+  let pos = 0;
+  const pushOriginal = (to: number) => {
+    for (; pos < to; pos++) {
+      finalText += cue.text[pos];
+      origins.push({ origin: 'original' });
+    }
+  };
+  for (const h of applied) {
+    pushOriginal(h.start);
+    for (let i = 0; i < h.replacement.length; i++) {
+      finalText += h.replacement[i];
+      origins.push({
+        origin: 'replacement',
+        hitKey: h.key,
+        ruleId: h.ruleId,
+        ruleName: h.ruleName,
+      });
+    }
+    pos = h.end + 1;
+  }
+  pushOriginal(cue.text.length);
+  return { finalText, origins };
+}
+
+/** 把二次命中覆盖的字符来源折叠为连续片段（同来源、同命中合并），供跨边界命中列出涉及区间 */
+function foldSegments(
+  origins: CharOrigin[],
+  start: number,
+  end: number,
+  finalText: string,
+): SafetySegment[] {
+  type Run = SafetySegment & { hitKey?: string };
+  const runs: Run[] = [];
+  for (let i = start; i < end; i++) {
+    const o = origins[i];
+    const last = runs[runs.length - 1];
+    const sameRun =
+      last !== undefined &&
+      last.origin === o.origin &&
+      (o.origin === 'original' || last.hitKey === o.hitKey);
+    if (sameRun) {
+      last.end = i + 1;
+    } else {
+      runs.push({
+        start: i,
+        end: i + 1,
+        origin: o.origin,
+        ruleId: o.ruleId,
+        ruleName: o.ruleName,
+        hitKey: o.hitKey,
+        text: '',
+      });
+    }
+  }
+  return runs.map(({ hitKey: _hitKey, ...s }) => ({ ...s, text: finalText.slice(s.start, s.end) }));
+}
+
+/**
+ * 对单条 cue 的导出文本二次运行启用规则，并按字符来源把命中分为：
+ * 人工保留（全落在原文）/ 替换产物（全落在单个替换片段内）/ 跨边界新命中（横跨多个片段）。
+ */
+export function scanCueResidue(cue: CueHit, compiled: CompiledRule[]): SafetyIssue[] {
+  const { finalText, origins } = finalTextWithOrigins(cue);
+  if (finalText.length === 0 || compiled.length === 0) return [];
+  const issues: SafetyIssue[] = [];
+  for (const { rule, regex } of compiled) {
+    regex.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    // 与主扫描一致：跳过零宽命中，防止死循环
+    while ((m = regex.exec(finalText)) !== null) {
+      const matched = m[0];
+      if (matched.length === 0) {
+        regex.lastIndex++;
+        continue;
+      }
+      const start = m.index;
+      const end = start + matched.length; // 不含
+      const covered = origins.slice(start, end);
+      const producerKeys = new Set(
+        covered.filter((o) => o.origin === 'replacement').map((o) => o.hitKey),
+      );
+      let kind: SafetyIssueKind;
+      let sourceRule: SafetyIssue['sourceRule'];
+      let segments: SafetySegment[] | undefined;
+      if (producerKeys.size === 0) {
+        // 全部来自未替换的原文：人工保留（逐条撤销 / 实体保留 / 抑制遗留），仅提示
+        kind = 'kept';
+      } else if (
+        producerKeys.size === 1 &&
+        covered.every((o) => o.origin === 'replacement')
+      ) {
+        // 完全落在单个替换产物内：记录来源规则（产生者）与目标规则（二次命中者）
+        kind = 'artifact';
+        const o = covered[0];
+        sourceRule = { id: o.ruleId ?? '', name: o.ruleName ?? '' };
+      } else {
+        // 横跨多个片段（替换产物之间或与原文交界）：列出涉及区间
+        kind = 'cross-boundary';
+        segments = foldSegments(origins, start, end, finalText);
+      }
+      issues.push({
+        key: `${cue.index}:${cue.start}:${start}-${end}:${rule.id}`,
+        cueIndex: cue.index,
+        cueId: cue.id,
+        time: { start: cue.start, end: cue.end },
+        kind,
+        blocking: kind !== 'kept',
+        rule: { id: rule.id, name: rule.name, priority: rule.priority },
+        start,
+        end,
+        match: matched,
+        sourceRule,
+        segments,
+      });
+    }
+  }
+  return issues;
+}
+
+/** 汇总全部 cue 的残留扫描：分类计数 + 是否阻断导出 */
+export function safetyScanCues(cues: CueHit[], compiled: CompiledRule[]): SafetyScanResult {
+  const issues: SafetyIssue[] = [];
+  for (const cue of cues) issues.push(...scanCueResidue(cue, compiled));
+  issues.sort(
+    (a, b) =>
+      a.cueIndex - b.cueIndex || a.start - b.start || a.rule.name.localeCompare(b.rule.name),
+  );
+  const counts: SafetyScanCounts = { kept: 0, artifact: 0, crossBoundary: 0 };
+  for (const i of issues) {
+    if (i.kind === 'kept') counts.kept++;
+    else if (i.kind === 'artifact') counts.artifact++;
+    else counts.crossBoundary++;
+  }
+  return {
+    blocked: counts.artifact > 0 || counts.crossBoundary > 0,
+    counts,
+    issues,
+  };
+}
+
+/** 导出被残留防线阻断（存在替换产物 / 跨边界新命中）时抛出 */
+export class ExportBlockedError extends Error {
+  readonly safetyScan: SafetyScanResult;
+  constructor(scan: SafetyScanResult) {
+    super(
+      `导出被残留防线阻断：替换产物 ${scan.counts.artifact} 处、跨边界新命中 ${scan.counts.crossBoundary} 处` +
+        `（人工保留 ${scan.counts.kept} 处仅提示）。请调整规则 / 替换模板或撤销相关命中后重试。`,
+    );
+    this.name = 'ExportBlockedError';
+    this.safetyScan = scan;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 导出                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -487,6 +674,8 @@ export function exportResult(input: {
   jobId?: string;
 }): ExportResult {
   const preview = buildPreview(input);
+  // 残留防线：替换产物 / 跨边界新命中阻断导出（人工保留仅提示，可导出）
+  if (preview.safetyScan.blocked) throw new ExportBlockedError(preview.safetyScan);
   const parsed = parseVtt(input.vtt);
   const payloadByIndex = new Map<number, string>();
   for (const cue of preview.cues) {
@@ -528,7 +717,7 @@ export function exportResult(input: {
   const sha256 = createHash('sha256').update(input.vtt, 'utf8').digest('hex');
   const audit: AuditReport = {
     app: 'subtitle-mask-console',
-    version: 3,
+    version: 4,
     generatedAt: new Date().toISOString(),
     source: {
       sha256,
@@ -551,6 +740,7 @@ export function exportResult(input: {
       action: d.action,
       decidedAt: d.decidedAt,
     })),
+    safetyScan: preview.safetyScan,
   };
 
   return {

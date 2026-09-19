@@ -32,6 +32,11 @@ export function ExportModal({ vtt, audit, onClose }: Props) {
           <span>抑制 {audit.stats.suppressedHits}</span>
           <span>例外 {audit.stats.exceptionHits}</span>
           <span>记录 {audit.records.length} 条</span>
+          {audit.safetyScan && (
+            <span title="导出残留防线：二次扫描中落在人工保留原文上的命中数（仅提示，未阻断）">
+              残留提示 {audit.safetyScan.counts.kept}
+            </span>
+          )}
         </div>
         <div className="modal-actions">
           <button

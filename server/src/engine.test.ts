@@ -423,7 +423,7 @@ test('实体决策：审计记录决策来源，导出与预览状态一致', ()
   const recs = ex.audit.records.filter((r) => r.entityKey === '张伟');
   assert.ok(recs.some((r) => r.status === 'applied' && r.decisionSource === 'exception'));
   assert.ok(recs.some((r) => r.status === 'reverted' && r.decisionSource === 'entity'));
-  assert.strictEqual(ex.audit.version, 3);
+  assert.strictEqual(ex.audit.version, 4);
   assert.strictEqual(ex.audit.stats.exceptionHits, 1);
   assert.ok(ex.audit.entityDecisions!.some((d) => d.entityKey === '张伟' && d.action === 'keep'));
   // 导出 VTT 与预览最终状态一致：例外处替换，其余保留
@@ -503,6 +503,161 @@ test('兼容：旧 job.json 迁移为逐条例外与空实体决定', () => {
   });
   assert.deepStrictEqual(m2.hitExceptions, [{ key: 'x', state: 'applied' }]);
   assert.strictEqual(m2.entityDecisions.length, 1);
+});
+
+/* ---------------------------- 导出残留防线 ---------------------------- */
+
+const SAFETY_VTT = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n电话 13812345678 谢谢。\n';
+
+function phoneMaskAllRule(): MaskRule {
+  return {
+    id: 'phone-mask',
+    name: '手机号-整体打码',
+    pattern: '1[3-9]\\d{9}',
+    flags: 'g',
+    replacement: '$MASKALL',
+    priority: 50,
+    enabled: true,
+    mode: 'template',
+    aliasPrefix: '',
+  };
+}
+
+function starRunRule(): MaskRule {
+  return {
+    id: 'star-run',
+    name: '星号串',
+    pattern: '\\*{4,}',
+    flags: 'g',
+    replacement: '[星]',
+    priority: 10,
+    enabled: true,
+    mode: 'template',
+    aliasPrefix: '',
+  };
+}
+
+/** 替换产物：二次命中完全落在单个替换片段内 → 阻断导出，记录来源规则与目标规则 */
+test('残留防线：替换产物被目标规则二次命中，阻断导出并标注来源规则', () => {
+  const rules = [phoneMaskAllRule(), starRunRule()];
+  const v = buildPreview({ vtt: SAFETY_VTT, rules });
+  // 手机号整体打码为 ***********，被「星号串」规则在导出文本中再次命中
+  assert.strictEqual(v.safetyScan.counts.artifact, 1);
+  assert.strictEqual(v.safetyScan.counts.kept, 0);
+  assert.strictEqual(v.safetyScan.blocked, true);
+  const issue = v.safetyScan.issues[0];
+  assert.strictEqual(issue.kind, 'artifact');
+  assert.strictEqual(issue.blocking, true);
+  assert.strictEqual(issue.match, '***********');
+  // 来源规则 = 产生替换片段的规则；目标规则 = 二次命中的规则
+  assert.strictEqual(issue.sourceRule?.id, 'phone-mask');
+  assert.strictEqual(issue.sourceRule?.name, '手机号-整体打码');
+  assert.strictEqual(issue.rule.id, 'star-run');
+  assert.strictEqual(issue.cueIndex, 0);
+
+  // 导出被阻断
+  assert.throws(() => exportResult({ vtt: SAFETY_VTT, rules }), /残留防线阻断/);
+
+  // 例外变化后实时重算：撤销该命中 → 替换产物消失，二次命中转为「人工保留」
+  const key = v.cues[0].hits[0].key;
+  const v2 = buildPreview({
+    vtt: SAFETY_VTT,
+    rules,
+    hitExceptions: [{ key, state: 'reverted' }],
+  });
+  assert.strictEqual(v2.safetyScan.counts.artifact, 0);
+  assert.strictEqual(v2.safetyScan.counts.kept, 1);
+  assert.strictEqual(v2.safetyScan.blocked, false);
+});
+
+/** 人工保留：撤销 / 保留的原文被二次命中 → 仅提示，不阻断；审计记录分类计数 */
+test('残留防线：人工保留的原文二次命中仅提示，导出放行且审计带计数', () => {
+  const rules = [phoneMaskAllRule()];
+  const v1 = buildPreview({ vtt: SAFETY_VTT, rules });
+  const key = v1.cues[0].hits[0].key;
+  const input = {
+    vtt: SAFETY_VTT,
+    rules,
+    hitExceptions: [{ key, state: 'reverted' as const }],
+  };
+  const v2 = buildPreview(input);
+  assert.strictEqual(v2.safetyScan.counts.kept, 1);
+  assert.strictEqual(v2.safetyScan.counts.artifact, 0);
+  assert.strictEqual(v2.safetyScan.counts.crossBoundary, 0);
+  assert.strictEqual(v2.safetyScan.blocked, false);
+  const issue = v2.safetyScan.issues[0];
+  assert.strictEqual(issue.kind, 'kept');
+  assert.strictEqual(issue.blocking, false);
+  assert.strictEqual(issue.match, '13812345678');
+  assert.strictEqual(issue.rule.id, 'phone-mask');
+
+  // 仅提示不阻断：导出成功，审计 JSON 记录 safetyScan 分类计数
+  const ex = exportResult(input);
+  assert.strictEqual(ex.audit.version, 4);
+  assert.deepStrictEqual(ex.audit.safetyScan.counts, { kept: 1, artifact: 0, crossBoundary: 0 });
+  assert.strictEqual(ex.audit.safetyScan.blocked, false);
+  assert.strictEqual(ex.audit.safetyScan.issues.length, 1);
+  assert.strictEqual(ex.audit.safetyScan.issues[0].kind, 'kept');
+});
+
+/** 跨边界新命中：替换产物与原文拼出更长命中 → 阻断导出，列出涉及区间 */
+test('残留防线：跨边界新命中阻断导出并列出涉及片段区间', () => {
+  const secretRule: MaskRule = {
+    id: 'secret',
+    name: '口令词',
+    pattern: 'secret',
+    flags: 'g',
+    replacement: '12345',
+    priority: 20,
+    enabled: true,
+    mode: 'template',
+    aliasPrefix: '',
+  };
+  const digitRule: MaskRule = {
+    id: 'digits',
+    name: '长数字',
+    pattern: '\\d{8,}',
+    flags: 'g',
+    replacement: '[数]',
+    priority: 10,
+    enabled: true,
+    mode: 'template',
+    aliasPrefix: '',
+  };
+  // 原文「secret67890」：secret → 12345 后与原文 67890 拼成 10 位数字
+  const vtt = 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n口令 secret67890 完毕\n';
+  const rules = [secretRule, digitRule];
+  const v = buildPreview({ vtt, rules });
+  assert.strictEqual(v.safetyScan.counts.crossBoundary, 1);
+  assert.strictEqual(v.safetyScan.blocked, true);
+  const issue = v.safetyScan.issues.find((i) => i.kind === 'cross-boundary')!;
+  assert.strictEqual(issue.rule.id, 'digits');
+  assert.strictEqual(issue.match, '1234567890');
+  assert.strictEqual(issue.blocking, true);
+  // 涉及区间：替换产物（口令词）+ 人工保留的原文
+  assert.strictEqual(issue.segments!.length, 2);
+  assert.strictEqual(issue.segments![0].origin, 'replacement');
+  assert.strictEqual(issue.segments![0].ruleId, 'secret');
+  assert.strictEqual(issue.segments![0].ruleName, '口令词');
+  assert.strictEqual(issue.segments![0].text, '12345');
+  assert.strictEqual(issue.segments![1].origin, 'original');
+  assert.strictEqual(issue.segments![1].text, '67890');
+  // 区间连续且覆盖整个命中
+  assert.strictEqual(issue.segments![0].start, issue.start);
+  assert.strictEqual(issue.segments![1].end, issue.end);
+
+  assert.throws(() => exportResult({ vtt, rules }), /残留防线阻断/);
+});
+
+/** 无残留：全部应用且替换不引入新命中时，扫描干净、审计计数为零 */
+test('残留防线：替换无残留时扫描为空，审计计数为零', () => {
+  const rules = [presetRule('手机号')];
+  const v = buildPreview({ vtt: SAMPLE_VTT, rules });
+  assert.strictEqual(v.safetyScan.blocked, false);
+  assert.deepStrictEqual(v.safetyScan.counts, { kept: 0, artifact: 0, crossBoundary: 0 });
+  assert.strictEqual(v.safetyScan.issues.length, 0);
+  const ex = exportResult({ vtt: SAMPLE_VTT, rules });
+  assert.deepStrictEqual(ex.audit.safetyScan.counts, { kept: 0, artifact: 0, crossBoundary: 0 });
 });
 
 console.log(`\n引擎自测全部通过（${passed} 项）`);

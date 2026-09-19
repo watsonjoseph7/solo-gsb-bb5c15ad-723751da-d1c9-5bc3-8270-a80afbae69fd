@@ -229,16 +229,33 @@ export default function App() {
     );
   }, []);
 
-  /* ------------- 导出 ------------- */
+  /* ------------- 导出（残留防线阻断时拦截并定位问题清单） ------------- */
   const doExport = async () => {
     if (!vtt.trim()) return;
+    const scan = preview?.safetyScan;
+    if (scan?.blocked) {
+      setError(
+        `导出已被残留防线阻断：替换产物 ${scan.counts.artifact} 处、跨边界新命中 ` +
+          `${scan.counts.crossBoundary} 处（人工保留 ${scan.counts.kept} 处仅提示）。` +
+          '请在右侧「导出残留防线」清单中定位处理。',
+      );
+      document
+        .getElementById('safety-panel')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
     try {
       const result = await api.export({ vtt, rules, hitExceptions, entityDecisions, aliases });
       setExportData(result);
     } catch (e) {
+      // 服务端同样执行残留防线（409）：预览过期时以此为准
       setError(`导出失败：${(e as Error).message}`);
     }
   };
+
+  const scanBlocked = preview?.safetyScan.blocked ?? false;
+  const scanBlockCount =
+    (preview?.safetyScan.counts.artifact ?? 0) + (preview?.safetyScan.counts.crossBoundary ?? 0);
 
   const saveLabel = {
     idle: '',
@@ -259,8 +276,17 @@ export default function App() {
         </div>
         <div className="topbar-right">
           <span className={`save-state save-${saveState}`}>{saveLabel}</span>
-          <button className="btn btn-primary btn-lg" onClick={doExport} disabled={!vtt.trim()}>
-            ④ 确认并导出
+          <button
+            className={`btn btn-lg ${scanBlocked ? 'btn-danger-solid' : 'btn-primary'}`}
+            onClick={doExport}
+            disabled={!vtt.trim()}
+            title={
+              scanBlocked
+                ? '存在替换产物 / 跨边界新命中，导出已被残留防线阻断（点击查看问题清单）'
+                : undefined
+            }
+          >
+            {scanBlocked ? `④ 导出被阻断（${scanBlockCount}）` : '④ 确认并导出'}
           </button>
         </div>
       </header>

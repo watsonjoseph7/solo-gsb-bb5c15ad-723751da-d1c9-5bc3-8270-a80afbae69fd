@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { CueHit, Hit, PreviewResult } from '../types';
+import { SafetyPanel } from './SafetyPanel';
 
 interface Props {
   preview: PreviewResult | null;
@@ -26,16 +27,18 @@ function segments(cue: CueHit): { text: string; hit?: Hit }[] {
 
 function CueCard({
   cue,
+  flash,
   onToggleHit,
   onClearException,
 }: {
   cue: CueHit;
+  flash: boolean;
   onToggleHit: (k: string) => void;
   onClearException: (k: string) => void;
 }) {
   const segs = useMemo(() => segments(cue), [cue]);
   return (
-    <article className="cue-card">
+    <article id={`cue-card-${cue.index}`} className={`cue-card ${flash ? 'cue-flash' : ''}`}>
       <div className="cue-time mono">
         {cue.start}
         {' --> '}
@@ -126,11 +129,28 @@ export function Preview({
   onApplyAll,
 }: Props) {
   const [onlyMatched, setOnlyMatched] = useState(false);
+  /** 残留防线「定位」时闪烁的 cue 序号 */
+  const [flashCue, setFlashCue] = useState<number | null>(null);
 
   const cues = useMemo(() => {
     if (!preview) return [];
     return onlyMatched ? preview.cues.filter((c) => c.hits.length > 0) : preview.cues;
   }, [preview, onlyMatched]);
+
+  /** 定位到指定 cue：先确保未被「仅看命中」过滤，再滚动并闪烁 */
+  const locateCue = (index: number) => {
+    setOnlyMatched(false);
+    setFlashCue(index);
+    window.setTimeout(() => {
+      document
+        .getElementById(`cue-card-${index}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+    window.setTimeout(() => setFlashCue((cur) => (cur === index ? null : cur)), 1700);
+  };
+
+  const scan = preview?.safetyScan ?? null;
+  const blockedCount = scan ? scan.counts.artifact + scan.counts.crossBoundary : 0;
 
   return (
     <section className="panel panel-grow">
@@ -171,8 +191,16 @@ export function Preview({
           {preview.exceptionHits > 0 && (
             <span className="stat-exception">逐条例外 {preview.exceptionHits}</span>
           )}
+          {scan && blockedCount > 0 && (
+            <span className="stat-blocked">残留阻断 {blockedCount}</span>
+          )}
+          {scan && scan.counts.kept > 0 && (
+            <span className="stat-kept">残留提示 {scan.counts.kept}</span>
+          )}
         </div>
       )}
+
+      {scan && <SafetyPanel scan={scan} onLocate={locateCue} />}
 
       <div className="cue-list">
         {preview && cues.length === 0 && <div className="empty-tip">没有可显示的字幕。</div>}
@@ -180,6 +208,7 @@ export function Preview({
           <CueCard
             key={c.index}
             cue={c}
+            flash={flashCue === c.index}
             onToggleHit={onToggleHit}
             onClearException={onClearException}
           />

@@ -755,6 +755,164 @@ select:focus {
   padding: 1px 6px;
 }
 
+/* ---------------- 导出残留防线 ---------------- */
+.safety-panel {
+  border: 1px solid var(--reverted-border);
+  background: #fffbeb;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.safety-blocked {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+.safety-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.safety-header h3 {
+  margin: 0;
+  font-size: 13.5px;
+}
+.safety-counts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+}
+.safety-count {
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.safety-count-kept {
+  background: var(--reverted-bg);
+  color: var(--reverted);
+}
+.safety-count-block {
+  background: #fee2e2;
+  color: var(--danger);
+}
+.safety-banner {
+  font-size: 12px;
+  margin: 8px 0 4px;
+  color: #991b1b;
+}
+.safety-banner-warn {
+  color: #92400e;
+}
+.safety-cue {
+  border-top: 1px dashed rgba(0, 0, 0, 0.14);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.safety-cue-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.safety-issue-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.safety-issue {
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.safety-kind {
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 8px;
+  padding: 0 6px;
+  color: #fff;
+  white-space: nowrap;
+}
+.safety-kind-kept {
+  background: var(--reverted);
+}
+.safety-kind-artifact,
+.safety-kind-cross-boundary {
+  background: var(--danger);
+}
+.safety-match {
+  font-weight: 600;
+  word-break: break-all;
+}
+.safety-desc {
+  color: var(--muted);
+  flex: 1;
+  min-width: 200px;
+}
+.safety-segments {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 4px;
+}
+.safety-seg {
+  border-radius: 4px;
+  padding: 0 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: #f1f5f9;
+  color: #334155;
+}
+.safety-seg-replacement {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* 残留防线「定位」时 cue 卡片闪烁 */
+@keyframes cue-flash {
+  0%,
+  100% {
+    box-shadow: none;
+  }
+  30% {
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.5);
+  }
+}
+.cue-flash {
+  animation: cue-flash 0.8s ease-in-out 2;
+}
+
+.stat-blocked {
+  color: var(--danger);
+  font-weight: 700;
+}
+.stat-kept {
+  color: var(--reverted);
+  font-weight: 600;
+}
+
+.btn-danger-solid {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.btn-danger-solid:hover:not(:disabled) {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
 /* ---------------- 横幅 / 弹层 ---------------- */
 .banner {
   background: #fffbeb;
